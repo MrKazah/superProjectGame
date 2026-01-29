@@ -1,0 +1,538 @@
+import arcade
+import math
+import random
+import os
+
+# --- КОНФИГУРАЦИЯ ---
+SCREEN_WIDTH = 800
+SCREEN_HEIGHT = 600
+SCREEN_TITLE = "Doom Arcade: Final Campaign"
+
+TILE_SIZE = 64
+MAP_SIZE_ROWS = 32
+MAP_SIZE_COLS = 32
+
+FOV = math.pi / 3
+HALF_FOV = FOV / 2
+NUM_RAYS = 160
+MAX_DEPTH = 1000 
+DELTA_ANGLE = FOV / NUM_RAYS
+DIST = NUM_RAYS / (2 * math.tan(HALF_FOV))
+PROJ_COEFF = 3 * DIST * TILE_SIZE
+SCALE = SCREEN_WIDTH // NUM_RAYS
+
+# ГЕЙМПЛЕЙ
+PLAYER_SPEED = 3.0
+SENSITIVITY = 0.002
+ENEMY_SPEED = 2.0
+ENEMY_SIZE = 20
+MIN_SPAWN_DIST = 300
+START_AMMO = 60
+
+# СОСТОЯНИЯ ИГРЫ
+STATE_MENU = 0
+STATE_LEVEL_SELECT = 1
+STATE_GAME = 2
+STATE_GAME_OVER = 3
+STATE_WIN = 4
+
+# ЦВЕТА
+COLOR_WALL_DARK = (10, 10, 30)
+COLOR_FLOOR = (20, 20, 40)
+COLOR_ENEMY_BODY = (255, 0, 0)   
+COLOR_ENEMY_EYE = (0, 255, 0)
+COLOR_BUTTON = (50, 50, 50)
+COLOR_BUTTON_LOCKED = (30, 30, 30)
+COLOR_BUTTON_HOVER = (80, 80, 80)
+
+# --- КЛАССЫ ---
+
+class SimpleExplosion:
+    def __init__(self, x, y):
+        self.particles = []
+        for _ in range(15): 
+            self.particles.append({
+                'x': x,
+                'y': y,
+                'vx': random.uniform(-6, 6),
+                'vy': random.uniform(-6, 6),
+                'life': 1.0
+            })
+
+    def update(self):
+        for p in self.particles:
+            p['x'] += p['vx']
+            p['y'] += p['vy']
+            p['life'] -= 0.08 
+
+    def draw(self):
+        for p in self.particles:
+            if p['life'] > 0:
+                alpha = int(255 * p['life'])
+                color = (255, 0, 0, alpha)
+                arcade.draw_circle_filled(p['x'], p['y'], 4, color)
+    
+    def is_alive(self):
+        return any(p['life'] > 0 for p in self.particles)
+
+
+class Player:
+    def __init__(self):
+        self.x = 100.0
+        self.y = 100.0
+        self.angle = 0.0
+        self.hp = 100
+        self.ammo = START_AMMO
+        self.score = 0
+
+
+class Enemy:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+        self.alive = True
+
+    def update(self, player, map_data, other_enemies):
+        if not self.alive: return
+
+        dx = player.x - self.x
+        dy = player.y - self.y
+        dist = math.hypot(dx, dy)
+
+        if 50 < dist < 800:
+            move_x = (dx / dist) * ENEMY_SPEED
+            move_y = (dy / dist) * ENEMY_SPEED
+            
+            if not self.check_wall(self.x + move_x, self.y, map_data):
+                self.x += move_x
+            if not self.check_wall(self.x, self.y + move_y, map_data):
+                self.y += move_y
+
+        if dist < 30:
+            player.hp -= 0.5
+
+        for other in other_enemies:
+            if other is self or not other.alive: continue
+            dist_other = math.hypot(self.x - other.x, self.y - other.y)
+            min_dist = ENEMY_SIZE * 1.5
+            if dist_other < min_dist:
+                push_x = (self.x - other.x) / dist_other
+                push_y = (self.y - other.y) / dist_other
+                self.x += push_x * 1.0
+                self.y += push_y * 1.0
+
+    def check_wall(self, x, y, map_data):
+        col = int(x / TILE_SIZE)
+        row = int(y / TILE_SIZE)
+        if 0 <= row < MAP_SIZE_ROWS and 0 <= col < MAP_SIZE_COLS:
+            return map_data[row][col] == '1'
+        return False
+
+
+class Button:
+    def __init__(self, x, y, width, height, text, level_id=None, locked=False):
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.text = text
+        self.level_id = level_id
+        self.locked = locked
+        self.hover = False
+
+    def draw(self):
+        color = COLOR_BUTTON_LOCKED if self.locked else (COLOR_BUTTON_HOVER if self.hover else COLOR_BUTTON)
+        rect = arcade.XYWH(self.x, self.y, self.width, self.height)
+        arcade.draw_rect_filled(rect, color)
+        arcade.draw_rect_outline(rect, arcade.color.WHITE, 2)
+        
+        text_color = arcade.color.GRAY if self.locked else arcade.color.WHITE
+        arcade.draw_text(self.text, self.x, self.y, text_color, 20, anchor_x="center", anchor_y="center")
+
+    def check_hover(self, mx, my):
+        self.hover = (self.x - self.width/2 < mx < self.x + self.width/2) and \
+                     (self.y - self.height/2 < my < self.y + self.height/2)
+
+    def is_clicked(self):
+        return self.hover and not self.locked
+
+
+class DoomGame(arcade.Window):
+    def __init__(self):
+        super().__init__(SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_TITLE)
+        
+        self.player = Player()
+        self.walls = set()
+        self.enemies = []
+        self.map_data = []
+        self.explosions = []
+        self.keys_pressed = set()
+        self.shot_fired = False
+        self.game_over_reason = ""
+        
+        self.game_state = STATE_MENU
+        self.current_level = 1
+        self.unlocked_levels = self.load_progress()
+        
+        self.btn_play = Button(SCREEN_WIDTH//2, SCREEN_HEIGHT//2, 200, 60, "PLAY")
+        self.btn_menu = Button(SCREEN_WIDTH//2, SCREEN_HEIGHT//2 - 100, 200, 50, "MENU")
+        self.level_buttons = []
+        self.update_level_buttons()
+
+    def load_progress(self):
+        if not os.path.exists("save.txt"):
+            return 1
+        try:
+            with open("save.txt", "r") as f:
+                return int(f.read())
+        except:
+            return 1
+
+    def save_progress(self):
+        if self.current_level >= self.unlocked_levels:
+            if self.current_level < 3:
+                self.unlocked_levels = self.current_level + 1
+                with open("save.txt", "w") as f:
+                    f.write(str(self.unlocked_levels))
+        self.update_level_buttons()
+
+    def update_level_buttons(self):
+        self.level_buttons = []
+        for i in range(1, 4):
+            locked = i > self.unlocked_levels
+            text = f"LEVEL {i}" + (" (LOCKED)" if locked else "")
+            btn = Button(SCREEN_WIDTH//2, SCREEN_HEIGHT - 150 - i*80, 300, 60, text, i, locked)
+            self.level_buttons.append(btn)
+
+    def setup_level(self, level):
+        self.current_level = level
+        self.map_data = [['.' for i in range(MAP_SIZE_COLS)] for j in range(MAP_SIZE_ROWS)]
+
+        for r in range(MAP_SIZE_ROWS):
+            self.map_data[r][0] = '1'
+            self.map_data[r][MAP_SIZE_COLS-1] = '1'
+        for c in range(MAP_SIZE_COLS):
+            self.map_data[0][c] = '1'
+            self.map_data[MAP_SIZE_ROWS-1][c] = '1'
+
+        wall_count = 200 + level * 50
+        enemy_chance = 0.03 + level * 0.02
+
+        for _ in range(wall_count): 
+            r = random.randint(1, MAP_SIZE_ROWS - 2)
+            c = random.randint(1, MAP_SIZE_COLS - 2)
+            if r < 5 and c < 5: continue
+            self.map_data[r][c] = '1'
+
+        self.walls.clear()
+        self.enemies.clear()
+
+        for j, row in enumerate(self.map_data):
+            for i, char in enumerate(row):
+                if char == '1':
+                    self.walls.add((i * TILE_SIZE, j * TILE_SIZE))
+                elif char == '.':
+                    if random.random() < enemy_chance:
+                        ex, ey = i * TILE_SIZE + TILE_SIZE // 2, j * TILE_SIZE + TILE_SIZE // 2
+                        if math.hypot(ex - 100, ey - 100) > MIN_SPAWN_DIST:
+                            self.enemies.append(Enemy(ex, ey))
+        
+        self.player.x = 100
+        self.player.y = 100
+        self.player.angle = 0
+        self.player.hp = 100
+        self.player.ammo = START_AMMO
+        self.player.score = 0
+        self.explosions = []
+        self.game_over_reason = ""
+        
+        self.set_mouse_visible(False)
+        self.set_exclusive_mouse(True)
+
+    def on_mouse_motion(self, x, y, dx, dy):
+        if self.game_state == STATE_GAME:
+            # ВЕРНУЛ += ДЛЯ СТАНДАРТНОГО УПРАВЛЕНИЯ
+            self.player.angle += dx * SENSITIVITY 
+        else:
+            self.btn_play.check_hover(x, y)
+            self.btn_menu.check_hover(x, y)
+            for btn in self.level_buttons:
+                btn.check_hover(x, y)
+
+    def on_mouse_press(self, x, y, button, modifiers):
+        if self.game_state == STATE_MENU:
+            if self.btn_play.is_clicked():
+                self.game_state = STATE_LEVEL_SELECT
+        
+        elif self.game_state == STATE_LEVEL_SELECT:
+            for btn in self.level_buttons:
+                if btn.is_clicked():
+                    self.game_state = STATE_GAME
+                    self.setup_level(btn.level_id)
+
+        elif self.game_state == STATE_GAME:
+            if button == arcade.MOUSE_BUTTON_LEFT:
+                self.shoot()
+
+        elif self.game_state in [STATE_GAME_OVER, STATE_WIN]:
+            if self.btn_menu.is_clicked():
+                self.game_state = STATE_MENU
+                self.set_mouse_visible(True)
+                self.set_exclusive_mouse(False)
+
+    def on_key_press(self, key, modifiers):
+        self.keys_pressed.add(key)
+        if key == arcade.key.ESCAPE:
+            if self.game_state == STATE_GAME:
+                self.game_state = STATE_MENU
+                self.set_mouse_visible(True)
+                self.set_exclusive_mouse(False)
+            elif self.game_state == STATE_MENU:
+                self.close()
+
+    def on_key_release(self, key, modifiers):
+        if key in self.keys_pressed:
+            self.keys_pressed.remove(key)
+
+    def on_update(self, delta_time):
+        if self.game_state != STATE_GAME: return
+
+        if self.player.hp <= 0:
+            self.game_over_reason = "DIED"
+            self.game_state = STATE_GAME_OVER
+            self.set_mouse_visible(True)
+            self.set_exclusive_mouse(False)
+            return
+
+        self.update_player_movement()
+
+        for exp in self.explosions:
+            exp.update()
+        self.explosions = [e for e in self.explosions if e.is_alive()]
+
+        alive_enemies = 0
+        for enemy in self.enemies:
+            if enemy.alive:
+                alive_enemies += 1
+                enemy.update(self.player, self.map_data, self.enemies)
+        
+        if alive_enemies == 0:
+            self.save_progress()
+            self.game_state = STATE_WIN
+            self.set_mouse_visible(True)
+            self.set_exclusive_mouse(False)
+            return
+
+        if self.player.ammo <= 0 and alive_enemies > 0:
+            self.game_over_reason = "OUT OF AMMO"
+            self.game_state = STATE_GAME_OVER
+            self.set_mouse_visible(True)
+            self.set_exclusive_mouse(False)
+
+    def update_player_movement(self):
+        sin_a = math.sin(self.player.angle)
+        cos_a = math.cos(self.player.angle)
+        dx, dy = 0, 0
+        speed = PLAYER_SPEED
+
+        if arcade.key.W in self.keys_pressed:
+            dx += speed * cos_a
+            dy += speed * sin_a
+        if arcade.key.S in self.keys_pressed:
+            dx -= speed * cos_a
+            dy -= speed * sin_a
+        if arcade.key.A in self.keys_pressed:
+            dx += speed * sin_a
+            dy -= speed * cos_a
+        if arcade.key.D in self.keys_pressed:
+            dx -= speed * sin_a
+            dy += speed * cos_a
+
+        if not self.check_wall(self.player.x + dx, self.player.y):
+            self.player.x += dx
+        if not self.check_wall(self.player.x, self.player.y + dy):
+            self.player.y += dy
+
+    def check_wall(self, x, y):
+        col = int(x / TILE_SIZE)
+        row = int(y / TILE_SIZE)
+        if 0 <= row < MAP_SIZE_ROWS and 0 <= col < MAP_SIZE_COLS:
+            return self.map_data[row][col] == '1'
+        return False
+
+    def get_wall_dist_at_center(self):
+        x, y = self.player.x, self.player.y
+        sin_a = math.sin(self.player.angle)
+        cos_a = math.cos(self.player.angle)
+        for depth in range(1, MAX_DEPTH, 8):
+            curr_x = x + depth * cos_a
+            curr_y = y + depth * sin_a
+            row, col = int(curr_y / TILE_SIZE), int(curr_x / TILE_SIZE)
+            if 0 <= row < MAP_SIZE_ROWS and 0 <= col < MAP_SIZE_COLS:
+                if self.map_data[row][col] == '1':
+                    return depth
+        return MAX_DEPTH
+
+    def shoot(self):
+        if self.player.ammo <= 0: return 
+
+        self.shot_fired = True
+        self.player.ammo -= 1 
+        
+        wall_dist = self.get_wall_dist_at_center()
+        hit_enemy = None
+        closest_dist = 9999
+
+        for enemy in self.enemies:
+            if not enemy.alive: continue
+            dx = enemy.x - self.player.x
+            dy = enemy.y - self.player.y
+            dist = math.hypot(dx, dy)
+            angle_to_enemy = math.atan2(dy, dx) - self.player.angle
+
+            if angle_to_enemy < -math.pi: angle_to_enemy += 2 * math.pi
+            if angle_to_enemy > math.pi: angle_to_enemy -= 2 * math.pi
+
+            if abs(angle_to_enemy) < 0.06 and dist < closest_dist and dist < wall_dist:
+                hit_enemy = enemy
+                closest_dist = dist
+
+        if hit_enemy:
+            hit_enemy.alive = False
+            self.player.score += 100
+            self.explosions.append(SimpleExplosion(SCREEN_WIDTH/2, SCREEN_HEIGHT/2))
+
+    def on_draw(self):
+        self.clear()
+
+        if self.game_state == STATE_MENU:
+            self.draw_menu()
+        elif self.game_state == STATE_LEVEL_SELECT:
+            self.draw_level_select()
+        elif self.game_state == STATE_GAME:
+            self.draw_game()
+        elif self.game_state == STATE_GAME_OVER:
+            self.draw_game_over()
+        elif self.game_state == STATE_WIN:
+            self.draw_win()
+
+    def draw_menu(self):
+        arcade.draw_text(SCREEN_TITLE, SCREEN_WIDTH/2, SCREEN_HEIGHT - 150, arcade.color.RED, 40, anchor_x="center")
+        self.btn_play.draw()
+
+    def draw_level_select(self):
+        arcade.draw_text("SELECT LEVEL", SCREEN_WIDTH/2, SCREEN_HEIGHT - 80, arcade.color.WHITE, 30, anchor_x="center")
+        for btn in self.level_buttons:
+            btn.draw()
+
+    def draw_game_over(self):
+        arcade.draw_rect_filled(arcade.XYWH(SCREEN_WIDTH/2, SCREEN_HEIGHT/2, SCREEN_WIDTH, SCREEN_HEIGHT), arcade.color.BLACK)
+        arcade.draw_text("GAME OVER", SCREEN_WIDTH/2, SCREEN_HEIGHT/2 + 50, arcade.color.RED, 50, anchor_x="center")
+        reason_text = "YOU DIED" if self.game_over_reason == "DIED" else "OUT OF AMMO"
+        arcade.draw_text(reason_text, SCREEN_WIDTH/2, SCREEN_HEIGHT/2, arcade.color.WHITE, 30, anchor_x="center")
+        self.btn_menu.draw()
+
+    def draw_win(self):
+        arcade.draw_rect_filled(arcade.XYWH(SCREEN_WIDTH/2, SCREEN_HEIGHT/2, SCREEN_WIDTH, SCREEN_HEIGHT), arcade.color.BLACK)
+        arcade.draw_text("LEVEL CLEARED!", SCREEN_WIDTH/2, SCREEN_HEIGHT/2 + 50, arcade.color.GREEN, 40, anchor_x="center")
+        if self.current_level < 3:
+            arcade.draw_text("Next level unlocked", SCREEN_WIDTH/2, SCREEN_HEIGHT/2, arcade.color.WHITE, 20, anchor_x="center")
+        else:
+            arcade.draw_text("CAMPAIGN COMPLETE!", SCREEN_WIDTH/2, SCREEN_HEIGHT/2, arcade.color.GOLD, 25, anchor_x="center")
+        self.btn_menu.draw()
+
+    def draw_game(self):
+        ceiling = arcade.XYWH(SCREEN_WIDTH / 2, SCREEN_HEIGHT, SCREEN_WIDTH, SCREEN_HEIGHT)
+        floor = arcade.XYWH(SCREEN_WIDTH / 2, 0, SCREEN_WIDTH, SCREEN_HEIGHT)
+        arcade.draw_rect_filled(ceiling, COLOR_WALL_DARK)
+        arcade.draw_rect_filled(floor, COLOR_FLOOR)
+        self.ray_casting()
+        
+        for exp in self.explosions: exp.draw()
+
+        if self.shot_fired:
+            arcade.draw_line(int(SCREEN_WIDTH/2+120), 0, int(SCREEN_WIDTH/2), int(SCREEN_HEIGHT/2), arcade.color.CYAN, 4)
+            self.shot_fired = False
+
+        arcade.draw_circle_outline(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2, 10, arcade.color.GREEN, 2)
+        arcade.draw_line(SCREEN_WIDTH//2 - 5, SCREEN_HEIGHT//2, SCREEN_WIDTH//2 + 5, SCREEN_HEIGHT//2, arcade.color.GREEN, 2)
+        arcade.draw_line(SCREEN_WIDTH//2, SCREEN_HEIGHT//2 - 5, SCREEN_WIDTH//2, SCREEN_HEIGHT//2 + 5, arcade.color.GREEN, 2)
+        
+        arcade.draw_text(f"HP: {int(self.player.hp)}", 20, 20, arcade.color.RED, 20)
+        ammo_color = arcade.color.WHITE
+        if self.player.ammo <= 10: ammo_color = arcade.color.RED
+        elif self.player.ammo <= 20: ammo_color = arcade.color.YELLOW
+        arcade.draw_text(f"AMMO: {self.player.ammo}", 150, 20, ammo_color, 20)
+        
+        self.draw_minimap()
+
+    def ray_casting(self):
+        cur_angle = self.player.angle - HALF_FOV
+        xo, yo = self.player.x, self.player.y
+        depth_buffer = [MAX_DEPTH] * NUM_RAYS
+
+        for ray in range(NUM_RAYS):
+            sin_a = math.sin(cur_angle)
+            cos_a = math.cos(cur_angle)
+
+            for depth in range(1, MAX_DEPTH, 8):
+                x = xo + depth * cos_a
+                y = yo + depth * sin_a
+                row, col = int(y / TILE_SIZE), int(x / TILE_SIZE)
+                if 0 <= row < MAP_SIZE_ROWS and 0 <= col < MAP_SIZE_COLS:
+                    if self.map_data[row][col] == '1':
+                        depth *= math.cos(self.player.angle - cur_angle)
+                        proj_height = PROJ_COEFF / (depth + 0.0001)
+                        shade = max(0, min(255, int(255 / (1 + depth * 0.003))))
+                        wall_rect = arcade.XYWH(ray * SCALE + SCALE / 2, SCREEN_HEIGHT / 2, SCALE + 1.5, proj_height)
+                        arcade.draw_rect_filled(wall_rect, (0, shade, shade))
+                        depth_buffer[ray] = depth
+                        break
+            cur_angle += DELTA_ANGLE
+        
+        sorted_enemies = sorted(self.enemies, key=lambda e: -math.hypot(e.x - self.player.x, e.y - self.player.y))
+        for enemy in sorted_enemies:
+            if not enemy.alive: continue
+            dx, dy = enemy.x - self.player.x, enemy.y - self.player.y
+            dist = math.hypot(dx, dy)
+            theta = math.atan2(dy, dx)
+            delta = theta - self.player.angle
+            if delta < -math.pi: delta += 2 * math.pi
+            if delta > math.pi: delta -= 2 * math.pi
+            delta_rays = delta / DELTA_ANGLE
+            screen_x = (NUM_RAYS // 2 + delta_rays) * SCALE
+            dist_fish = dist * math.cos(delta)
+            proj_height = PROJ_COEFF / (dist_fish + 0.0001)
+            if 0 <= int(screen_x // SCALE) < NUM_RAYS and dist_fish < depth_buffer[int(screen_x // SCALE)]:
+                arcade.draw_circle_filled(screen_x, SCREEN_HEIGHT / 2, proj_height / 3, COLOR_ENEMY_BODY)
+                arcade.draw_circle_filled(screen_x, SCREEN_HEIGHT / 2, proj_height / 8, COLOR_ENEMY_EYE)
+
+    def draw_minimap(self):
+        map_size = 200 
+        offset_x, offset_y = SCREEN_WIDTH - map_size, SCREEN_HEIGHT - map_size
+        bg_rect = arcade.XYWH(offset_x + map_size/2, offset_y + map_size/2, map_size, map_size)
+        arcade.draw_rect_filled(bg_rect, (0, 0, 0, 150))
+        arcade.draw_rect_outline(bg_rect, arcade.color.WHITE, 2)
+
+        scale_mini = map_size / (MAP_SIZE_COLS * TILE_SIZE)
+        
+        for wx, wy in self.walls:
+            mx = offset_x + wx * scale_mini
+            my = offset_y + wy * scale_mini
+            arcade.draw_rect_filled(arcade.XYWH(mx, my, 2, 2), arcade.color.WHITE)
+
+        px = offset_x + self.player.x * scale_mini
+        py = offset_y + self.player.y * scale_mini
+        arcade.draw_circle_filled(px, py, 3, arcade.color.GREEN)
+        arcade.draw_line(px, py, px + math.cos(self.player.angle)*15, py + math.sin(self.player.angle)*15, arcade.color.GREEN, 1)
+
+        for e in self.enemies:
+            if e.alive:
+                ex = offset_x + e.x * scale_mini
+                ey = offset_y + e.y * scale_mini
+                arcade.draw_circle_filled(ex, ey, 2, arcade.color.RED)
+
+
+if __name__ == "__main__":
+    window = DoomGame()
+    arcade.run()
