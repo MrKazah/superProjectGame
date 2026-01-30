@@ -6,7 +6,7 @@ import os
 # --- КОНФИГУРАЦИЯ ---
 SCREEN_WIDTH = 800
 SCREEN_HEIGHT = 600
-SCREEN_TITLE = "Doom Arcade: Fixed Collisions"
+SCREEN_TITLE = "Doom Arcade: Final Correct Controls"
 
 TILE_SIZE = 64
 MAP_SIZE_ROWS = 32
@@ -25,7 +25,7 @@ SCALE = SCREEN_WIDTH // NUM_RAYS
 PLAYER_SPEED = 3.0
 SENSITIVITY = 0.002
 ENEMY_SPEED = 2.0
-ENEMY_SIZE = 20 # Размер врага
+ENEMY_SIZE = 20
 MIN_SPAWN_DIST = 300
 START_AMMO = 60
 
@@ -44,8 +44,6 @@ COLOR_ENEMY_EYE = (0, 255, 0)
 COLOR_BUTTON = (50, 50, 50)
 COLOR_BUTTON_LOCKED = (30, 30, 30)
 COLOR_BUTTON_HOVER = (80, 80, 80)
-
-# --- КЛАССЫ ---
 
 class SimpleExplosion:
     def __init__(self, x, y):
@@ -75,7 +73,6 @@ class SimpleExplosion:
     def is_alive(self):
         return any(p['life'] > 0 for p in self.particles)
 
-
 class Player:
     def __init__(self):
         self.x = 100.0
@@ -84,7 +81,6 @@ class Player:
         self.hp = 100
         self.ammo = START_AMMO
         self.score = 0
-
 
 class Enemy:
     def __init__(self, x, y):
@@ -99,23 +95,18 @@ class Enemy:
         dy = player.y - self.y
         dist = math.hypot(dx, dy)
 
-        # Движение
         if 50 < dist < 800:
             move_x = (dx / dist) * ENEMY_SPEED
             move_y = (dy / dist) * ENEMY_SPEED
             
-            # --- ИСПРАВЛЕНИЕ: ПРОВЕРКА ТОЛЩИНЫ ВРАГА ---
-            # Теперь передаем True, чтобы проверить радиус врага, а не точку
             if not self.check_wall(self.x + move_x, self.y, map_data, use_radius=True):
                 self.x += move_x
             if not self.check_wall(self.x, self.y + move_y, map_data, use_radius=True):
                 self.y += move_y
 
-        # Атака
         if dist < 30:
             player.hp -= 0.5
 
-        # Расталкивание врагов (чтобы не проходили друг сквозь друга)
         for other in other_enemies:
             if other is self or not other.alive: continue
             dist_other = math.hypot(self.x - other.x, self.y - other.y)
@@ -127,7 +118,6 @@ class Enemy:
                 new_x = self.x + push_x * 1.0
                 new_y = self.y + push_y * 1.0
                 
-                # Проверяем, не толкают ли нас в стену
                 if not self.check_wall(new_x, self.y, map_data, use_radius=True):
                     self.x = new_x
                 if not self.check_wall(self.x, new_y, map_data, use_radius=True):
@@ -135,16 +125,13 @@ class Enemy:
 
     def check_wall(self, x, y, map_data, use_radius=False):
         if not use_radius:
-            # Простая проверка точки (для лучей и т.д.)
             col = int(x / TILE_SIZE)
             row = int(y / TILE_SIZE)
             if 0 <= row < MAP_SIZE_ROWS and 0 <= col < MAP_SIZE_COLS:
                 return map_data[row][col] == '1'
             return False
         else:
-            # --- СЛОЖНАЯ ПРОВЕРКА (ДЛЯ ТЕЛА) ---
-            # Проверяем 4 угла вокруг врага, чтобы он не зашел в стену боком
-            padding = ENEMY_SIZE * 0.4 # Чуть меньше полного радиуса
+            padding = ENEMY_SIZE * 0.4
             check_points = [
                 (x - padding, y - padding),
                 (x + padding, y - padding),
@@ -158,7 +145,6 @@ class Enemy:
                     if map_data[row][col] == '1':
                         return True
             return False
-
 
 class Button:
     def __init__(self, x, y, width, height, text, level_id=None, locked=False):
@@ -186,7 +172,6 @@ class Button:
 
     def is_clicked(self):
         return self.hover and not self.locked
-
 
 class DoomGame(arcade.Window):
     def __init__(self):
@@ -282,7 +267,8 @@ class DoomGame(arcade.Window):
 
     def on_mouse_motion(self, x, y, dx, dy):
         if self.game_state == STATE_GAME:
-            self.player.angle += dx * SENSITIVITY 
+            # ОБЫЧНАЯ МЫШЬ: Влево = Влево
+            self.player.angle -= dx * SENSITIVITY 
         else:
             self.btn_play.check_hover(x, y)
             self.btn_menu.check_hover(x, y)
@@ -365,27 +351,31 @@ class DoomGame(arcade.Window):
         dx, dy = 0, 0
         speed = PLAYER_SPEED
 
+        # ВПЕРЕД
         if arcade.key.W in self.keys_pressed:
             dx += speed * cos_a
             dy += speed * sin_a
+        # НАЗАД
         if arcade.key.S in self.keys_pressed:
             dx -= speed * cos_a
             dy -= speed * sin_a
+        
+        # СТРЕЙФ ВЛЕВО (правильная формула для угла)
         if arcade.key.A in self.keys_pressed:
-            dx -= speed * sin_a
-            dy += speed * cos_a
-        if arcade.key.D in self.keys_pressed:
             dx += speed * sin_a
             dy -= speed * cos_a
+            
+        # СТРЕЙФ ВПРАВО
+        if arcade.key.D in self.keys_pressed:
+            dx -= speed * sin_a
+            dy += speed * cos_a
 
-        # Проверка коллизий игрока (тоже с учетом радиуса, упрощенно)
         if not self.check_wall(self.player.x + dx, self.player.y):
             self.player.x += dx
         if not self.check_wall(self.player.x, self.player.y + dy):
             self.player.y += dy
 
     def check_wall(self, x, y):
-        # Для игрока оставляем простую проверку, или можно тоже сделать радиус
         col = int(x / TILE_SIZE)
         row = int(y / TILE_SIZE)
         if 0 <= row < MAP_SIZE_ROWS and 0 <= col < MAP_SIZE_COLS:
