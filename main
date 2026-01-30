@@ -6,7 +6,7 @@ import os
 # --- КОНФИГУРАЦИЯ ---
 SCREEN_WIDTH = 800
 SCREEN_HEIGHT = 600
-SCREEN_TITLE = "Doom Arcade: Final Correct Controls"
+SCREEN_TITLE = "Doom Arcade: Fixed Controls Final"
 
 TILE_SIZE = 64
 MAP_SIZE_ROWS = 32
@@ -45,6 +45,8 @@ COLOR_BUTTON = (50, 50, 50)
 COLOR_BUTTON_LOCKED = (30, 30, 30)
 COLOR_BUTTON_HOVER = (80, 80, 80)
 
+# --- КЛАССЫ ---
+
 class SimpleExplosion:
     def __init__(self, x, y):
         self.particles = []
@@ -73,6 +75,7 @@ class SimpleExplosion:
     def is_alive(self):
         return any(p['life'] > 0 for p in self.particles)
 
+
 class Player:
     def __init__(self):
         self.x = 100.0
@@ -81,6 +84,7 @@ class Player:
         self.hp = 100
         self.ammo = START_AMMO
         self.score = 0
+
 
 class Enemy:
     def __init__(self, x, y):
@@ -95,18 +99,22 @@ class Enemy:
         dy = player.y - self.y
         dist = math.hypot(dx, dy)
 
+        # Движение
         if 50 < dist < 800:
             move_x = (dx / dist) * ENEMY_SPEED
             move_y = (dy / dist) * ENEMY_SPEED
             
+            # Проверка коллизий с учетом радиуса
             if not self.check_wall(self.x + move_x, self.y, map_data, use_radius=True):
                 self.x += move_x
             if not self.check_wall(self.x, self.y + move_y, map_data, use_radius=True):
                 self.y += move_y
 
+        # Атака
         if dist < 30:
             player.hp -= 0.5
 
+        # Расталкивание
         for other in other_enemies:
             if other is self or not other.alive: continue
             dist_other = math.hypot(self.x - other.x, self.y - other.y)
@@ -146,6 +154,7 @@ class Enemy:
                         return True
             return False
 
+
 class Button:
     def __init__(self, x, y, width, height, text, level_id=None, locked=False):
         self.x = x
@@ -172,6 +181,7 @@ class Button:
 
     def is_clicked(self):
         return self.hover and not self.locked
+
 
 class DoomGame(arcade.Window):
     def __init__(self):
@@ -267,8 +277,8 @@ class DoomGame(arcade.Window):
 
     def on_mouse_motion(self, x, y, dx, dy):
         if self.game_state == STATE_GAME:
-            # ОБЫЧНАЯ МЫШЬ: Влево = Влево
-            self.player.angle -= dx * SENSITIVITY 
+            # ВЕРНУЛ ПЛЮС (Как было в начале)
+            self.player.angle += dx * SENSITIVITY 
         else:
             self.btn_play.check_hover(x, y)
             self.btn_menu.check_hover(x, y)
@@ -351,21 +361,16 @@ class DoomGame(arcade.Window):
         dx, dy = 0, 0
         speed = PLAYER_SPEED
 
-        # ВПЕРЕД
+        # ВЕРНУЛ СТАРУЮ ЛОГИКУ ХОДЬБЫ
         if arcade.key.W in self.keys_pressed:
             dx += speed * cos_a
             dy += speed * sin_a
-        # НАЗАД
         if arcade.key.S in self.keys_pressed:
             dx -= speed * cos_a
             dy -= speed * sin_a
-        
-        # СТРЕЙФ ВЛЕВО (правильная формула для угла)
         if arcade.key.A in self.keys_pressed:
-            dx += speed * sin_a
+            dx += speed * sin_a  # Было минус, стало плюс (как просил вернуть)
             dy -= speed * cos_a
-            
-        # СТРЕЙФ ВПРАВО
         if arcade.key.D in self.keys_pressed:
             dx -= speed * sin_a
             dy += speed * cos_a
